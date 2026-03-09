@@ -1,0 +1,102 @@
+import pandas as pd
+import nltk
+import re
+import string
+from nltk.corpus import stopwords
+from nltk.sentiment import SentimentIntensityAnalyzer
+from wordcloud import WordCloud, STOPWORDS
+from collections import Counter
+import matplotlib.pyplot as plt
+
+# Initialization & Setup
+for pkg in ['stopwords', 'punkt', 'averaged_perceptron_tagger', 'vader_lexicon']:
+    nltk.download(pkg)
+
+class AmazonFullPipeline:
+    def __init__(self, raw_tsv_path, cleaned_csv_path=None):
+        # Phase 1: Data Integration
+        self.raw_data = pd.read_csv(raw_tsv_path, sep='\t', on_bad_lines='skip')
+        
+        if cleaned_csv_path:
+            self.reviews = pd.read_csv(cleaned_csv_path)
+            # Merge to get product_title and category back into cleaned reviews
+            self.data = pd.merge(self.reviews, self.raw_data[['review_id', 'product_title', 'product_category']], on='review_id', how='left')
+        else:
+            self.data = self.raw_data.copy()
+
+        self.sia = SentimentIntensityAnalyzer()
+        self.stop_words = set(stopwords.words('english'))
+        # Custom irrelevant tokens from your Word_Analysis scripts
+        self.irrelevant_tokens = {'i', "don't", 'only', 'ive', "i've", "can't", 'same', 'im', "i'am", 'would'}
+
+    def preprocess_and_tag(self):
+        """Phase 2: Cleaning and Adjective Extraction"""
+        # Text Cleaning
+        self.data['review_body_clean'] = self.data['review_body'].astype(str).str.lower().str.translate(str.maketrans('', '', string.punctuation))
+        self.data['tokens'] = self.data['review_body_clean'].apply(nltk.word_tokenize)
+        
+        # POS Tagging (Extracting JJ, JJR, JJS)
+        def extract_adjectives(tokens):
+            tagged = nltk.pos_tag(tokens)
+            return [word for word, tag in tagged if tag in ('JJ', 'JJR', 'JJS') and word not in self.irrelevant_tokens]
+        
+        self.data['adjectives'] = self.data['tokens'].apply(extract_adjectives)
+
+    def analyze_sentiment_and_issues(self):
+        """Phase 3: Review Sentiment & Logistical Diagnostics"""
+        # Review Sentiment
+        self.data['compound'] = self.data['review_body_clean'].apply(lambda x: self.sia.polarity_scores(x)['compound'])
+        self.data['sentiment'] = self.data['compound'].apply(
+            lambda c: 'positive' if c > 0.05 else ('negative' if c < -0.5 else 'neutral')
+        )
+
+        # Keyword mapping for logistical issues
+        keywords = {
+            'Shipping': {'shipping', 'ship', 'transit', 'delayed', 'delivery', 'late', 'slow'},
+            'Handling': {'package', 'broken', 'missing', 'torn', 'damaged', 'scratched'},
+            'Refund': {'refund', 'return', 'replacement', 'rejected', 'unfair'},
+            'Factory': {'defect', 'quality', 'cheap', 'flawed', 'build', 'malfunction', 'factory'}
+        }
+        
+        for issue, keys in keywords.items():
+            self.data[f'{issue} Issue'] = self.data['tokens'].apply(
+                lambda x: "Yes" if any(word in keys for word in x) else "No"
+            )
+
+    def get_product_insights(self, top_n=30):
+        """Phase 4: Aggregated Adjective Sentiment (Replacement for Word_Analysis scripts)"""
+        # Group adjectives by product
+        product_adj = self.data.groupby('product_title')['adjectives'].apply(
+            lambda lists: [item for sublist in lists for item in sublist]
+        ).reset_index()
+
+        def score_top_words(adj_list):
+            counts = Counter(adj_list).most_common(top_n)
+            # Calculate sentiment for the word itself (Level B Sentiment)
+            return {word: self.sia.polarity_scores(word)['compound'] for word, count in counts}
+
+        product_adj['top_adjective_sentiments'] = product_adj['adjectives'].apply(score_top_words)
+        return product_adj
+
+    def generate_wordcloud(self, category, sentiment_filter='negative'):
+        """Phase 5: Visualization Logic"""
+        subset = self.data[(self.data['product_category'] == category) & (self.data['sentiment'] == sentiment_filter)]
+        all_words = " ".join([" ".join(adj) for adj in subset['adjectives']])
+        
+        if not all_words:
+            print("No data found for this combination.")
+            return
+
+        wc = WordCloud(width=800, height=400, background_color='white', stopwords=STOPWORDS).generate(all_words)
+        plt.figure(figsize=(10, 5))
+        plt.imshow(wc, interpolation='bilinear')
+        plt.axis('off')
+        plt.title(f"Top Descriptors for {sentiment_filter} {category} Reviews")
+        plt.show()
+
+# Example Usage:
+# pipeline = AmazonFullPipeline('amazon_reviews.tsv')
+# pipeline.preprocess_and_tag()
+# pipeline.analyze_sentiment_and_issues()
+# insights = pipeline.get_product_insights()
+# pipeline.generate_wordcloud('Health & Personal Care', 'negative')
